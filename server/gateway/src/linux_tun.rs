@@ -28,6 +28,10 @@ impl LinuxTun {
         Ok(Self { file })
     }
 
+    pub fn try_clone(&self) -> io::Result<Self> {
+        Ok(Self { file: self.file.try_clone()? })
+    }
+
     pub fn fd(&self) -> RawFd { self.file.as_raw_fd() }
 }
 
