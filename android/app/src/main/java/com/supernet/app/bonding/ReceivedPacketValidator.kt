@@ -11,7 +11,7 @@ object ReceivedPacketValidator {
 
     fun extractPayload(frame: ByteArray, expectedSessionId: Long): ByteArray? {
         if (frame.size < HEADER_SIZE || frame.size > MAX_FRAME) return null
-        if (frame[0] != 'S'.code.toByte() || frame[1] != 'U'.code.toByte() || frame[2] != 'P'.code.toByte() || frame[3] != 'N'.code.toByte()) return null
+        if (frame[0] != 'S'.code.toByte() || frame[1] != 'P'.code.toByte() || frame[2] != 'N'.code.toByte() || frame[3] != '1'.code.toByte()) return null
         if ((frame[4].toInt() and 0xff) != VERSION) return null
         val b = ByteBuffer.wrap(frame).order(ByteOrder.BIG_ENDIAN)
         b.position(8)
