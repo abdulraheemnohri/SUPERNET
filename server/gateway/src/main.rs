@@ -1,3 +1,4 @@
+mod ack;
 mod heartbeat;
 mod handshake;
 mod linux_tun;
@@ -10,6 +11,7 @@ use std::io;
 use std::net::UdpSocket;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use ack::cumulative_ack;
 use handshake::ControlMessage;
 use heartbeat::expire_paths;
 use linux_tun::LinuxTun;
@@ -42,15 +44,7 @@ fn now_ms() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_defa
 
 fn send_control(socket: &UdpSocket, peer: std::net::SocketAddr, message: ControlMessage) -> io::Result<()> {
     let session_id = match message {
-        ControlMessage::ClientHello { session_id }
-        | ControlMessage::SessionAccept { session_id }
-        | ControlMessage::SessionClose { session_id }
-        | ControlMessage::PathRegister { session_id, .. }
-        | ControlMessage::PathAck { session_id, .. }
-        | ControlMessage::Heartbeat { session_id, .. }
-        | ControlMessage::HeartbeatAck { session_id, .. }
-        | ControlMessage::PathClose { session_id, .. }
-        | ControlMessage::Ack { session_id, .. } => session_id,
+        ControlMessage::ClientHello { session_id } | ControlMessage::SessionAccept { session_id } | ControlMessage::SessionClose { session_id } | ControlMessage::PathRegister { session_id, .. } | ControlMessage::PathAck { session_id, .. } | ControlMessage::Heartbeat { session_id, .. } | ControlMessage::HeartbeatAck { session_id, .. } | ControlMessage::PathClose { session_id, .. } | ControlMessage::Ack { session_id, .. } => session_id,
     };
     let encoded = packet::encode(session_id, 0, 0, now_ms(), FLAG_CONTROL, &message.encode());
     socket.send_to(&encoded, peer)?;
@@ -96,19 +90,13 @@ fn main() -> io::Result<()> {
                     }
                 }
                 ControlMessage::PathClose { session_id, path_id } => {
-                    if let Some(session) = sessions.get_mut(session_id) {
-                        if let Some(path) = session.paths.get_mut(&path_id) { path.active = false; }
-                    }
+                    if let Some(session) = sessions.get_mut(session_id) { if let Some(path) = session.paths.get_mut(&path_id) { path.active = false; } }
                 }
                 ControlMessage::SessionClose { session_id } => {
-                    if let Some(session) = sessions.get_mut(session_id) {
-                        for path in session.paths.values_mut() { path.active = false; }
-                    }
+                    if let Some(session) = sessions.get_mut(session_id) { for path in session.paths.values_mut() { path.active = false; } }
                     reassembly.remove(&session_id);
                 }
-                ControlMessage::SessionAccept { .. }
-                | ControlMessage::PathAck { .. }
-                | ControlMessage::HeartbeatAck { .. } => {}
+                ControlMessage::SessionAccept { .. } | ControlMessage::PathAck { .. } | ControlMessage::HeartbeatAck { .. } => {}
             }
             if let Some(session) = sessions.get_mut(packet.session_id) { expire_paths(&mut session.paths.values_mut()); }
             continue;
@@ -116,15 +104,20 @@ fn main() -> io::Result<()> {
 
         let session_id = packet.session_id;
         let path_id = packet.path_id;
+        let sequence = packet.sequence;
         let mut ready = Vec::new();
         {
             let session = sessions.get_or_create(session_id);
             session.touch_path(path_id, peer);
             let buffer = reassembly.entry(session_id).or_insert_with(|| ReassemblyBuffer::new(session.next_rx_sequence, 256));
-            ready = buffer.push(packet.sequence, packet.payload);
+            ready = buffer.push(sequence, packet.payload);
             session.next_rx_sequence = buffer.next_sequence();
         }
         for payload in ready { if !payload.is_empty() { gateway_tun.write_packet(&payload)?; } }
-        if let Some(session) = sessions.get_mut(session_id) { expire_paths(&mut session.paths.values_mut()); }
+        if let Some(session) = sessions.get_mut(session_id) {
+            expire_paths(&mut session.paths.values_mut());
+            let ack = cumulative_ack(session_id, path_id, session.next_rx_sequence.saturating_sub(1));
+            send_control(&socket, peer, ack)?;
+        }
     }
 }
