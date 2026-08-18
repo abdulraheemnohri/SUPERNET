@@ -16,12 +16,13 @@ pub struct SessionState {
     pub paths: HashMap<u32, PathState>,
     pub next_rx_sequence: u64,
     pub next_tx_sequence: u64,
+    pub last_ack: u64,
     next_path_cursor: usize,
 }
 
 impl SessionState {
     pub fn new(session_id: u64) -> Self {
-        Self { session_id, paths: HashMap::new(), next_rx_sequence: 0, next_tx_sequence: 0, next_path_cursor: 0 }
+        Self { session_id, paths: HashMap::new(), next_rx_sequence: 0, next_tx_sequence: 0, last_ack: 0, next_path_cursor: 0 }
     }
 
     pub fn attach_path(&mut self, path_id: u32, endpoint: SocketAddr) {
@@ -40,9 +41,7 @@ impl SessionState {
         self.paths.values().filter(|p| p.active)
     }
 
-    /// Deterministic round-robin selection. The caller can use the returned
-    /// endpoint for reverse traffic while the session remains alive when other
-    /// paths disappear.
+    /// Deterministic round-robin selection for reverse traffic.
     pub fn select_next_path(&mut self) -> Option<(u32, SocketAddr)> {
         let mut ids: Vec<u32> = self.paths.values().filter(|p| p.active).map(|p| p.path_id).collect();
         ids.sort_unstable();
@@ -61,6 +60,6 @@ impl SessionManager {
     pub fn get_or_create(&mut self, session_id: u64) -> &mut SessionState {
         self.sessions.entry(session_id).or_insert_with(|| SessionState::new(session_id))
     }
-    pub fn get(&self, session_id: u64) -> Option<&SessionState> { self.sessions.get(&session_id) }
-    pub fn get_mut(&mut self, session_id: u64) -> Option<&mut SessionState> { self.sessions.get_mut(&session_id) }
+    pub fn get(&self, session_id: u64) -> Option<&SessionState> { self.sessions.get(session_id) }
+    pub fn get_mut(&mut self, session_id: u64) -> Option<&mut SessionState> { self.sessions.get_mut(session_id) }
 }
