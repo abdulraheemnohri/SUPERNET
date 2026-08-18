@@ -5,13 +5,13 @@ import java.nio.ByteOrder
 
 sealed interface ControlMessage {
     val sessionId: Long
-
     data class ClientHello(override val sessionId: Long) : ControlMessage
     data class SessionAccept(override val sessionId: Long) : ControlMessage
     data class PathRegister(override val sessionId: Long, val pathId: Int) : ControlMessage
     data class PathAck(override val sessionId: Long, val pathId: Int) : ControlMessage
     data class Heartbeat(override val sessionId: Long, val pathId: Int, val nonce: Long) : ControlMessage
     data class HeartbeatAck(override val sessionId: Long, val pathId: Int, val nonce: Long) : ControlMessage
+    data class Ack(override val sessionId: Long, val pathId: Int, val sequence: Long) : ControlMessage
     data class PathClose(override val sessionId: Long, val pathId: Int) : ControlMessage
     data class SessionClose(override val sessionId: Long) : ControlMessage
 
@@ -22,6 +22,7 @@ sealed interface ControlMessage {
         private const val PATH_ACK = 4
         private const val HEARTBEAT = 5
         private const val HEARTBEAT_ACK = 6
+        private const val ACK = 9
         private const val PATH_CLOSE = 7
         private const val SESSION_CLOSE = 8
 
@@ -30,6 +31,7 @@ sealed interface ControlMessage {
                 is ClientHello, is SessionAccept, is SessionClose -> 9
                 is PathRegister, is PathAck, is PathClose -> 13
                 is Heartbeat, is HeartbeatAck -> 21
+                is Ack -> 21
             }
             val out = ByteBuffer.allocate(size).order(ByteOrder.BIG_ENDIAN)
             when (message) {
@@ -39,6 +41,7 @@ sealed interface ControlMessage {
                 is PathAck -> out.put(PATH_ACK.toByte()).putLong(message.sessionId).putInt(message.pathId)
                 is Heartbeat -> out.put(HEARTBEAT.toByte()).putLong(message.sessionId).putInt(message.pathId).putLong(message.nonce)
                 is HeartbeatAck -> out.put(HEARTBEAT_ACK.toByte()).putLong(message.sessionId).putInt(message.pathId).putLong(message.nonce)
+                is Ack -> out.put(ACK.toByte()).putLong(message.sessionId).putInt(message.pathId).putLong(message.sequence)
                 is PathClose -> out.put(PATH_CLOSE.toByte()).putLong(message.sessionId).putInt(message.pathId)
                 is SessionClose -> out.put(SESSION_CLOSE.toByte()).putLong(message.sessionId)
             }
@@ -55,10 +58,11 @@ sealed interface ControlMessage {
                 CLIENT_HELLO -> if (bytes.size == 9) session()?.let(::ClientHello) else null
                 SESSION_ACCEPT -> if (bytes.size == 9) session()?.let(::SessionAccept) else null
                 PATH_REGISTER -> if (bytes.size == 13) { val s = session(); val p = path(); if (s != null && p != null) PathRegister(s, p) else null } else null
-                PATH_ACK -> if (bytes.size == 13) { val s = session(); val p = path(); if (s != null && p != null) PathAck(s, p) else null }
-                PATH_CLOSE -> if (bytes.size == 13) { val s = session(); val p = path(); if (s != null && p != null) PathClose(s, p) else null }
+                PATH_ACK -> if (bytes.size == 13) { val s = session(); val p = path(); if (s != null && p != null) PathAck(s, p) else null } else null
                 HEARTBEAT -> if (bytes.size == 21) { val s = session(); val p = path(); val n = nonce(); if (s != null && p != null && n != null) Heartbeat(s, p, n) else null } else null
                 HEARTBEAT_ACK -> if (bytes.size == 21) { val s = session(); val p = path(); val n = nonce(); if (s != null && p != null && n != null) HeartbeatAck(s, p, n) else null } else null
+                ACK -> if (bytes.size == 21) { val s = session(); val p = path(); val seq = nonce(); if (s != null && p != null && seq != null) Ack(s, p, seq) else null } else null
+                PATH_CLOSE -> if (bytes.size == 13) { val s = session(); val p = path(); if (s != null && p != null) PathClose(s, p) else null } else null
                 SESSION_CLOSE -> if (bytes.size == 9) session()?.let(::SessionClose) else null
                 else -> null
             }
