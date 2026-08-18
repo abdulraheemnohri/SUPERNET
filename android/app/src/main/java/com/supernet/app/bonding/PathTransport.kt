@@ -8,6 +8,7 @@ interface PathTransport {
 
     suspend fun connect()
     suspend fun send(packet: BondingPacket)
+    suspend fun receive(): BondingPacket? = null
     suspend fun close()
 }
 
@@ -27,4 +28,11 @@ class PathTransportRegistry {
 
     @Synchronized
     fun all(): List<PathTransport> = transports.values.toList()
+
+    suspend fun send(packet: BondingPacket) {
+        val transport = synchronized(this) {
+            transports.values.firstOrNull { it.link.id.hashCode() == packet.pathId && it.connected }
+        } ?: return
+        transport.send(packet)
+    }
 }
