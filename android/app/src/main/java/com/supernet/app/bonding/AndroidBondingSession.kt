@@ -73,7 +73,11 @@ class AndroidBondingSession(
         tunReader = VpnPacketReader(vpnDescriptor) { payload ->
             scope.launch(Dispatchers.IO) {
                 val packet = scheduler.next(payload, sessionId) ?: return@launch
-                runCatching { transports.send(packet) }
+                try {
+                    transports.send(packet)
+                } catch (_: Exception) {
+                    // Path health/failover logic owns subsequent scheduling decisions.
+                }
             }
         }
         tunReader?.start()
@@ -82,7 +86,7 @@ class AndroidBondingSession(
     private suspend fun attachPath(link: NetworkLink, network: Network) {
         val pathId = link.id.hashCode()
         val transport = NetworkPathTransport(link, network, gateway)
-        runCatching {
+        try {
             transport.connect()
             transports.attach(transport)
             val control = ControlChannel(network, gateway, sessionId, pathId)
@@ -96,13 +100,11 @@ class AndroidBondingSession(
                     val packet = transport.receive() ?: continue
                     if (packet.sessionId != sessionId) continue
                     if ((packet.flags and 0x01) != 0) continue
-                    val payload = ReceivedPacketValidator.extractPayload(
-                        BondingPacket.encode(packet), sessionId
-                    ) ?: continue
+                    val payload = ReceivedPacketValidator.extractPayload(BondingPacket.encode(packet), sessionId) ?: continue
                     reassembly.offer(packet.sequence, payload).forEach { writer.write(it) }
                 }
             }
-        }.onFailure {
+        } catch (_: Exception) {
             transport.close()
         }
     }
