@@ -9,10 +9,7 @@ import java.net.DatagramSocket
 import java.net.InetSocketAddress
 import java.util.concurrent.atomic.AtomicBoolean
 
-/**
- * V1 UDP transport bound to a specific Android Network.
- * QUIC can replace this transport without changing the bonding core.
- */
+/** V1 UDP transport bound to a specific Android Network. */
 class NetworkPathTransport(
     override val link: NetworkLink,
     private val network: Network,
@@ -28,6 +25,7 @@ class NetworkPathTransport(
         if (connected) return@withContext
         val created = network.socketFactory.createDatagramSocket()
         created.connect(gateway)
+        created.soTimeout = 1000
         socket = created
         isConnected.set(true)
     }
@@ -36,6 +34,18 @@ class NetworkPathTransport(
         val current = socket ?: error("Path ${link.id} is not connected")
         val bytes = BondingPacket.encode(packet)
         current.send(DatagramPacket(bytes, bytes.size, gateway))
+    }
+
+    override suspend fun receive(): BondingPacket? = withContext(Dispatchers.IO) {
+        val current = socket ?: return@withContext null
+        val buffer = ByteArray(65535)
+        val packet = DatagramPacket(buffer, buffer.size)
+        try {
+            current.receive(packet)
+            BondingPacket.decode(packet.data.copyOf(packet.length))
+        } catch (_: java.net.SocketTimeoutException) {
+            null
+        }
     }
 
     override suspend fun close() = withContext(Dispatchers.IO) {
