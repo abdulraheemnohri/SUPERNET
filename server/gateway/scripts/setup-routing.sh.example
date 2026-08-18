@@ -1,0 +1,7 @@
+# Example
+# sudo ./setup-routing.sh eth0 10.77.0.0/24
+#
+# The gateway service must route packets addressed to the SUPERNet TUN
+# interface through the host's normal upstream interface. Apply firewall
+# policy deliberately for your deployment; this script enables IPv4
+# forwarding and source NAT for the supplied SUPERNet subnet.
