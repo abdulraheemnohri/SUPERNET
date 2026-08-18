@@ -49,7 +49,8 @@ fn send_control(socket: &UdpSocket, peer: std::net::SocketAddr, message: Control
         | ControlMessage::PathAck { session_id, .. }
         | ControlMessage::Heartbeat { session_id, .. }
         | ControlMessage::HeartbeatAck { session_id, .. }
-        | ControlMessage::PathClose { session_id, .. } => session_id,
+        | ControlMessage::PathClose { session_id, .. }
+        | ControlMessage::Ack { session_id, .. } => session_id,
     };
     let encoded = packet::encode(session_id, 0, 0, now_ms(), FLAG_CONTROL, &message.encode());
     socket.send_to(&encoded, peer)?;
@@ -87,6 +88,12 @@ fn main() -> io::Result<()> {
                     let session = sessions.get_or_create(session_id);
                     session.touch_path(path_id, peer);
                     send_control(&socket, peer, ControlMessage::HeartbeatAck { session_id, path_id, nonce })?;
+                }
+                ControlMessage::Ack { session_id, path_id, sequence } => {
+                    if let Some(session) = sessions.get_mut(session_id) {
+                        session.touch_path(path_id, peer);
+                        session.last_ack = session.last_ack.max(sequence);
+                    }
                 }
                 ControlMessage::PathClose { session_id, path_id } => {
                     if let Some(session) = sessions.get_mut(session_id) {
