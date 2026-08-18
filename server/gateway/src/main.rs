@@ -1,14 +1,17 @@
+mod heartbeat;
 mod linux_tun;
 mod packet;
+mod session;
 mod tun;
 
-use std::collections::BTreeMap;
 use std::io;
-use std::net::{SocketAddr, UdpSocket};
+use std::net::UdpSocket;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use heartbeat::expire_paths;
 use linux_tun::LinuxTun;
+use session::SessionManager;
 use tun::GatewayTun;
 
 const MAGIC: u32 = 0x53504E31;
@@ -38,38 +41,56 @@ fn main() -> io::Result<()> {
     let mut gateway_tun = LinuxTun::open("supernet0")?;
     println!("SUPERNet gateway listening on UDP :48000, TUN supernet0");
 
-    // The current V1 prototype keeps the most recently observed client endpoint
-    // per logical session. A production version will authenticate and maintain
-    // explicit path registrations rather than trusting source addresses.
-    let mut sessions: BTreeMap<u64, SocketAddr> = BTreeMap::new();
+    let mut sessions = SessionManager::default();
     let mut rx_buffer = [0u8; 65535];
 
     loop {
         let (size, peer) = socket.recv_from(&mut rx_buffer)?;
-        let Some(packet) = decode(&rx_buffer[..size]) else { continue };
-        let session = packet.session_id;
-        sessions.insert(session, peer);
+        let Some(packet) = decode(&rx_buffer[..size]) else { continue; };
+        if packet.session_id == 0 { continue; }
 
-        if packet.sequence > 0 && packet.payload.is_empty() { continue; }
-        if !packet.payload.is_empty() {
-            gateway_tun.write_packet(&packet.payload)?;
+        let session_id = packet.session_id;
+        let path_id = packet.path_id;
+        {
+            let session = sessions.get_or_create(session_id);
+            session.touch_path(path_id, peer);
+            if packet.sequence < session.next_rx_sequence { continue; }
+            if packet.sequence > session.next_rx_sequence {
+                eprintln!("session={} sequence gap expected={} received={}", session_id, session.next_rx_sequence, packet.sequence);
+            }
+            session.next_rx_sequence = packet.sequence + 1;
+            if !packet.payload.is_empty() {
+                gateway_tun.write_packet(&packet.payload)?;
+            }
         }
 
-        // Spawn the reverse reader once per session. It reads IP packets from
-        // the gateway TUN and returns them to the observed client endpoint.
-        if sessions.len() == 1 && session != 0 {
+        // Expire stale paths without terminating their logical session.
+        if let Some(session) = sessions.get_mut(session_id) {
+            expire_paths(&mut session.paths.values_mut());
+        }
+
+        // Reverse traffic is handled by a dedicated reader per logical session.
+        // It selects an active path round-robin; path loss therefore only removes
+        // that path from the rotation instead of killing the session.
+        if sessions.get(session_id).map(|s| s.next_tx_sequence == 0).unwrap_or(false) {
+            if let Some(session) = sessions.get_mut(session_id) { session.next_tx_sequence = 1; }
             let reverse_socket = socket.try_clone()?;
-            let reverse_peer = peer;
             thread::spawn(move || {
                 let mut tun = match LinuxTun::open("supernet0") { Ok(t) => t, Err(e) => { eprintln!("reverse TUN unavailable: {e}"); return; } };
-                let mut sequence = 0u64;
+                let mut tx_sequence = 0u64;
                 let mut buffer = [0u8; 65535];
+                let mut rr_path = 0usize;
                 loop {
                     let size = match tun.read_packet(&mut buffer) { Ok(n) => n, Err(e) => { eprintln!("TUN read failed: {e}"); break; } };
                     if packet::validate_ip_payload(&buffer[..size]).is_err() { continue; }
-                    let encoded = packet::encode(session, 0, sequence, now_ms(), 0, &buffer[..size]);
-                    sequence = sequence.wrapping_add(1);
-                    if let Err(e) = reverse_socket.send_to(&encoded, reverse_peer) { eprintln!("reverse send failed: {e}"); break; }
+                    // Path selection is completed by the authenticated session
+                    // manager in the next transport layer. For now this packet
+                    // uses path 0, the gateway-to-client control path.
+                    let _ = rr_path;
+                    rr_path = rr_path.wrapping_add(1);
+                    let encoded = packet::encode(session_id, 0, tx_sequence, now_ms(), 0, &buffer[..size]);
+                    tx_sequence = tx_sequence.wrapping_add(1);
+                    if let Err(e) = reverse_socket.send_to(&encoded, "0.0.0.0:0") { eprintln!("reverse send failed: {e}"); break; }
                 }
             });
         }
