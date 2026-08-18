@@ -2,6 +2,7 @@ mod heartbeat;
 mod handshake;
 mod linux_tun;
 mod packet;
+mod reassembly;
 mod session;
 mod tun;
 
@@ -12,6 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use handshake::ControlMessage;
 use heartbeat::expire_paths;
 use linux_tun::LinuxTun;
+use reassembly::ReassemblyBuffer;
 use session::SessionManager;
 use tun::GatewayTun;
 
@@ -60,6 +62,7 @@ fn main() -> io::Result<()> {
     println!("SUPERNet gateway listening on UDP :48000, TUN supernet0");
 
     let mut sessions = SessionManager::default();
+    let mut reassembly: std::collections::HashMap<u64, ReassemblyBuffer> = std::collections::HashMap::new();
     let mut rx_buffer = [0u8; 65535];
 
     loop {
@@ -72,6 +75,7 @@ fn main() -> io::Result<()> {
             match control {
                 ControlMessage::ClientHello { session_id } => {
                     sessions.get_or_create(session_id);
+                    reassembly.entry(session_id).or_insert_with(|| ReassemblyBuffer::new(0, 256));
                     send_control(&socket, peer, ControlMessage::SessionAccept { session_id })?;
                 }
                 ControlMessage::PathRegister { session_id, path_id } => {
@@ -93,34 +97,27 @@ fn main() -> io::Result<()> {
                     if let Some(session) = sessions.get_mut(session_id) {
                         for path in session.paths.values_mut() { path.active = false; }
                     }
+                    reassembly.remove(&session_id);
                 }
                 ControlMessage::SessionAccept { .. }
                 | ControlMessage::PathAck { .. }
                 | ControlMessage::HeartbeatAck { .. } => {}
             }
-
-            if let Some(session) = sessions.get_mut(packet.session_id) {
-                expire_paths(&mut session.paths.values_mut());
-            }
+            if let Some(session) = sessions.get_mut(packet.session_id) { expire_paths(&mut session.paths.values_mut()); }
             continue;
         }
 
         let session_id = packet.session_id;
         let path_id = packet.path_id;
+        let mut ready = Vec::new();
         {
             let session = sessions.get_or_create(session_id);
             session.touch_path(path_id, peer);
-            if packet.sequence < session.next_rx_sequence { continue; }
-            if packet.sequence > session.next_rx_sequence {
-                eprintln!("session={} sequence gap expected={} received={}", session_id, session.next_rx_sequence, packet.sequence);
-            }
-            session.next_rx_sequence = packet.sequence.wrapping_add(1);
-            if !packet.payload.is_empty() {
-                gateway_tun.write_packet(&packet.payload)?;
-            }
+            let buffer = reassembly.entry(session_id).or_insert_with(|| ReassemblyBuffer::new(session.next_rx_sequence, 256));
+            ready = buffer.push(packet.sequence, packet.payload);
+            session.next_rx_sequence = buffer.next_sequence();
         }
-        if let Some(session) = sessions.get_mut(session_id) {
-            expire_paths(&mut session.paths.values_mut());
-        }
+        for payload in ready { if !payload.is_empty() { gateway_tun.write_packet(&payload)?; } }
+        if let Some(session) = sessions.get_mut(session_id) { expire_paths(&mut session.paths.values_mut()); }
     }
 }
