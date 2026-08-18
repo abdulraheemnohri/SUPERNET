@@ -4,11 +4,14 @@ mod handshake;
 mod linux_tun;
 mod packet;
 mod reassembly;
+mod reverse;
+mod scheduler;
 mod session;
 mod tun;
 
 use std::io;
 use std::net::UdpSocket;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ack::cumulative_ack;
@@ -54,9 +57,12 @@ fn send_control(socket: &UdpSocket, peer: std::net::SocketAddr, message: Control
 fn main() -> io::Result<()> {
     let socket = UdpSocket::bind("0.0.0.0:48000")?;
     let mut gateway_tun = LinuxTun::open("supernet0")?;
+    let reverse_tun = gateway_tun.try_clone()?;
+    let sessions = Arc::new(Mutex::new(SessionManager::default()));
+
+    reverse::start(reverse_tun, socket.try_clone()?, Arc::clone(&sessions))?;
     println!("SUPERNet gateway listening on UDP :48000, TUN supernet0");
 
-    let mut sessions = SessionManager::default();
     let mut reassembly: std::collections::HashMap<u64, ReassemblyBuffer> = std::collections::HashMap::new();
     let mut rx_buffer = [0u8; 65535];
 
@@ -67,54 +73,64 @@ fn main() -> io::Result<()> {
 
         if packet.flags & FLAG_CONTROL != 0 {
             let Ok(control) = ControlMessage::decode(&packet.payload) else { continue; };
+            let mut manager = sessions.lock().map_err(|_| io::Error::other("session manager poisoned"))?;
             match control {
                 ControlMessage::ClientHello { session_id } => {
-                    sessions.get_or_create(session_id);
+                    manager.get_or_create(session_id);
                     reassembly.entry(session_id).or_insert_with(|| ReassemblyBuffer::new(0, 256));
                     send_control(&socket, peer, ControlMessage::SessionAccept { session_id })?;
                 }
                 ControlMessage::PathRegister { session_id, path_id } => {
-                    let session = sessions.get_or_create(session_id);
+                    let session = manager.get_or_create(session_id);
                     session.touch_path(path_id, peer);
                     send_control(&socket, peer, ControlMessage::PathAck { session_id, path_id })?;
                 }
                 ControlMessage::Heartbeat { session_id, path_id, nonce } => {
-                    let session = sessions.get_or_create(session_id);
+                    let session = manager.get_or_create(session_id);
                     session.touch_path(path_id, peer);
                     send_control(&socket, peer, ControlMessage::HeartbeatAck { session_id, path_id, nonce })?;
                 }
                 ControlMessage::Ack { session_id, path_id, sequence } => {
-                    if let Some(session) = sessions.get_mut(session_id) {
+                    if let Some(session) = manager.get_mut(session_id) {
                         session.touch_path(path_id, peer);
                         session.last_ack = session.last_ack.max(sequence);
                     }
                 }
                 ControlMessage::PathClose { session_id, path_id } => {
-                    if let Some(session) = sessions.get_mut(session_id) { if let Some(path) = session.paths.get_mut(&path_id) { path.active = false; } }
+                    if let Some(session) = manager.get_mut(session_id) {
+                        if let Some(path) = session.paths.get_mut(&path_id) { path.active = false; }
+                    }
                 }
                 ControlMessage::SessionClose { session_id } => {
-                    if let Some(session) = sessions.get_mut(session_id) { for path in session.paths.values_mut() { path.active = false; } }
+                    if let Some(session) = manager.get_mut(session_id) {
+                        for path in session.paths.values_mut() { path.active = false; }
+                    }
                     reassembly.remove(&session_id);
                 }
                 ControlMessage::SessionAccept { .. } | ControlMessage::PathAck { .. } | ControlMessage::HeartbeatAck { .. } => {}
             }
-            if let Some(session) = sessions.get_mut(packet.session_id) { expire_paths(&mut session.paths.values_mut()); }
+            if let Some(session) = manager.get_mut(packet.session_id) { expire_paths(&mut session.paths.values_mut()); }
             continue;
         }
 
+        packet::validate_ip_payload(&packet.payload)?;
         let session_id = packet.session_id;
         let path_id = packet.path_id;
         let sequence = packet.sequence;
         let mut ready = Vec::new();
         {
-            let session = sessions.get_or_create(session_id);
+            let mut manager = sessions.lock().map_err(|_| io::Error::other("session manager poisoned"))?;
+            let session = manager.get_or_create(session_id);
             session.touch_path(path_id, peer);
             let buffer = reassembly.entry(session_id).or_insert_with(|| ReassemblyBuffer::new(session.next_rx_sequence, 256));
             ready = buffer.push(sequence, packet.payload);
             session.next_rx_sequence = buffer.next_sequence();
         }
-        for payload in ready { if !payload.is_empty() { gateway_tun.write_packet(&payload)?; } }
-        if let Some(session) = sessions.get_mut(session_id) {
+        for payload in ready {
+            if !payload.is_empty() { gateway_tun.write_packet(&payload)?; }
+        }
+        let mut manager = sessions.lock().map_err(|_| io::Error::other("session manager poisoned"))?;
+        if let Some(session) = manager.get_mut(session_id) {
             expire_paths(&mut session.paths.values_mut());
             let ack = cumulative_ack(session_id, path_id, session.next_rx_sequence.saturating_sub(1));
             send_control(&socket, peer, ack)?;
