@@ -34,14 +34,15 @@ impl SessionState {
             path.endpoint = endpoint;
             path.last_seen = Instant::now();
             path.active = true;
-        } else { self.attach_path(path_id, endpoint); }
+        } else {
+            self.attach_path(path_id, endpoint);
+        }
     }
 
     pub fn active_paths(&self) -> impl Iterator<Item = &PathState> {
         self.paths.values().filter(|p| p.active)
     }
 
-    /// Deterministic round-robin selection for reverse traffic.
     pub fn select_next_path(&mut self) -> Option<(u32, SocketAddr)> {
         let mut ids: Vec<u32> = self.paths.values().filter(|p| p.active).map(|p| p.path_id).collect();
         ids.sort_unstable();
@@ -60,6 +61,12 @@ impl SessionManager {
     pub fn get_or_create(&mut self, session_id: u64) -> &mut SessionState {
         self.sessions.entry(session_id).or_insert_with(|| SessionState::new(session_id))
     }
-    pub fn get(&self, session_id: u64) -> Option<&SessionState> { self.sessions.get(session_id) }
-    pub fn get_mut(&mut self, session_id: u64) -> Option<&mut SessionState> { self.sessions.get_mut(session_id) }
+    pub fn get(&self, session_id: u64) -> Option<&SessionState> { self.sessions.get(&session_id) }
+    pub fn get_mut(&mut self, session_id: u64) -> Option<&mut SessionState> { self.sessions.get_mut(&session_id) }
+
+    pub fn first_active_session_id(&self) -> Option<u64> {
+        self.sessions.values()
+            .find(|session| session.active_paths().next().is_some())
+            .map(|session| session.session_id)
+    }
 }
