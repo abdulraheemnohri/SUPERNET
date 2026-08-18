@@ -11,6 +11,7 @@ import com.supernet.app.bonding.AndroidBondingSession
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 
 class SuperNetVpnService : VpnService() {
     companion object {
