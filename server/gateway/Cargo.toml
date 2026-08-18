@@ -1,0 +1,8 @@
+[package]
+name = "supernet-gateway"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "supernet-gateway"
+path = "src/main.rs"
