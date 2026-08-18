@@ -73,11 +73,7 @@ class AndroidBondingSession(
         tunReader = VpnPacketReader(vpnDescriptor) { payload ->
             scope.launch(Dispatchers.IO) {
                 val packet = scheduler.next(payload, sessionId) ?: return@launch
-                try {
-                    transports.send(packet)
-                } catch (_: Exception) {
-                    // Path health/failover logic owns subsequent scheduling decisions.
-                }
+                try { transports.send(packet) } catch (_: Exception) { }
             }
         }
         tunReader?.start()
@@ -93,18 +89,22 @@ class AndroidBondingSession(
             channels[link.id] = control
             control.open()
             control.send(ControlMessage.ClientHello(sessionId))
+            val accepted = control.receive()
+            if (accepted !is ControlMessage.SessionAccept || accepted.sessionId != sessionId) {
+                throw IllegalStateException("SUPERNet gateway did not accept session")
+            }
             control.send(ControlMessage.PathRegister(sessionId, pathId))
 
             receiveJobs += scope.launch(Dispatchers.IO) {
                 while (isActive && transport.connected) {
                     val packet = transport.receive() ?: continue
-                    if (packet.sessionId != sessionId) continue
-                    if ((packet.flags and 0x01) != 0) continue
+                    if (packet.sessionId != sessionId || (packet.flags and 0x01) != 0) continue
                     val payload = ReceivedPacketValidator.extractPayload(BondingPacket.encode(packet), sessionId) ?: continue
                     reassembly.offer(packet.sequence, payload).forEach { writer.write(it) }
                 }
             }
         } catch (_: Exception) {
+            channels.remove(link.id)
             transport.close()
         }
     }
